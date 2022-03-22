@@ -3,7 +3,9 @@ import math
 import torch.utils.model_zoo as model_zoo
 import torch
 import torch.nn.functional as F
-import Res2Net as Pre_Res2Net
+import models.Res2Net as Pre_Res2Net
+#from models.DCNv2.dcn_v2 import DCN # DFE module
+
 
 model_urls = {
     'res2net50_v1b_26w_4s': 'https://shanghuagao.oss-cn-beijing.aliyuncs.com/res2net/res2net50_v1b_26w_4s-3cf99910.pth',
@@ -150,6 +152,7 @@ class Res2Net(nn.Module):
 ######################
 def default_conv(in_channels, out_channels, kernel_size, bias=True):
     return nn.Conv2d(in_channels, out_channels, kernel_size, padding=(kernel_size // 2), bias=bias)
+
 class PALayer(nn.Module):
     def __init__(self, channel):
         super(PALayer, self).__init__()
@@ -246,47 +249,158 @@ class Enhancer(nn.Module):
 
         return dehaze
 
+class DCNBlock(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(DCNBlock, self).__init__()
+        self.dcn = DCN(in_channel, out_channel, kernel_size=(3,3), stride=1, padding=1).cuda()
+    def forward(self, x):
+        return self.dcn(x)
+
+class Mix(nn.Module):
+    def __init__(self, m=-0.80):
+        super(Mix, self).__init__()
+        w = torch.nn.Parameter(torch.FloatTensor([m]), requires_grad=True)
+        w = torch.nn.Parameter(w, requires_grad=True)
+        self.w = w
+        self.mix_block = nn.Sigmoid()
+
+    def forward(self, fea1, fea2):
+        mix_factor = self.mix_block(self.w)
+        out = fea1 * mix_factor.expand_as(fea1) + fea2 * (1 - mix_factor.expand_as(fea2))
+        return out
+
+
 class Dehaze(nn.Module):
     def __init__(self):
         super(Dehaze, self).__init__()
         
         self.encoder = Res2Net(Bottle2neck, [3, 4, 23, 3], baseWidth=26, scale=4)
+
+        # Get Pretrained models
         res2net101 = Pre_Res2Net.Res2Net(Bottle2neck, [3, 4, 23, 3], baseWidth=26, scale=4)
         res2net101.load_state_dict(model_zoo.load_url(model_urls['res2net101_v1b_26w_4s']))
         pretrained_dict = res2net101.state_dict()
+
+        # Get the untrained encoder state dict
         model_dict = self.encoder.state_dict()
-        key_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict} 
-        model_dict.update(key_dict) 
-        self.encoder.load_state_dict(model_dict)  
+        # Get key and values from the pretrained dict that is also in the encoder state dict
+        key_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
 
+        # Update encoder with the pretrained state dict
+        model_dict.update(key_dict)
+        self.encoder.load_state_dict(model_dict)
+
+        # Has PA and CA in it; Attention/FA module
+        # Added multiple ones
         self.mid_conv = DehazeBlock(default_conv, 1024, 3)
-
+        self.mid_conv2 = DehazeBlock(default_conv, 1024, 3)
+        self.mid_conv3 = DehazeBlock(default_conv, 1024, 3)
+        self.mid_conv4 = DehazeBlock(default_conv, 1024, 3)
+        self.mid_conv5 = DehazeBlock(default_conv, 1024, 3)
+        self.mid_conv6 = DehazeBlock(default_conv, 1024, 3)
+        
         self.up_block1 = nn.PixelShuffle(2)
         self.attention1 = DehazeBlock(default_conv, 256, 3)
-        self.attention2 = DehazeBlock(default_conv, 192, 3)  
+        self.attention2 = DehazeBlock(default_conv, 192, 3)
+
+        # DFE module
+        # self.dcn_block1 = DCNBlock(256, 256)
+        # self.dcn_block2 = DCNBlock(256, 256)
+
+        # Up sampling layers
+        self.up_layer = nn.Sequential(nn.ConvTranspose2d(256, 512, kernel_size=3, stride=1, padding=1), nn.ReLU(True))
+        self.up_layer2 = nn.Sequential(nn.ConvTranspose2d(128, 256, kernel_size=3, stride=1, padding=1), nn.ReLU(True))
+        self.mix1 = Mix(m=-1)
+        self.mix2 = Mix(m=-0.6)
+
+        # Added multiple enhancer blocks
         self.enhancer = Enhancer(28, 28)
+        self.enhancer2 = Enhancer(1024, 1024)
+        self.enhancer3 = Enhancer(1024, 1024)
+
         self.tail = nn.Sequential(nn.ReflectionPad2d(3), nn.Conv2d(28, 3, kernel_size=7, padding=0), nn.Tanh())
 
     def forward(self, input):
-
-        x,x_layer1,x_layer2 = self.encoder(input) 
-        
+        x, x_layer1, x_layer2 = self.encoder(input)
+        #print(x.size(), x_layer1.size(), x_layer2.size())
+        # FA block
         x_mid = self.mid_conv(x)
+        x_mid = self.mid_conv2(x_mid)
+        x_mid = self.mid_conv3(x_mid)
+        x_mid = self.mid_conv4(x_mid)
+        x_mid = self.mid_conv5(x_mid)
+        x_mid = self.mid_conv6(x_mid)
         
+        # DFE block
+        # dcn_1 = self.dcn_block1(x_mid)
+        # dcn_2 = self.dcn_block2(dcn_1)
+        #x_en = self.enhancer2(x_mid)
+        #x_en = self.enhancer3(x_en)
+        
+        # Instead of concat, we mix them
+        #x_up1 = self.up_block1(x_mid)
+        #x_up1 = self.attention1(x) 
+        #x_up1 = self.up_layer(x_up1)
+        #x_out_mix = self.mix1(x_up1, x_layer2)
+        #print(x_out_mix.size(), "out mix 1")
+        #x_up2 = self.up_block1(x_out_mix)
+        #print(x_up2.size(), "up2 size")
+        #x_up2 = self.attention2(x_up2)
+        
+        #x_up2 = self.up_layer2(x_up2)
+        #x_out_mix2 = self.mix2(x_up2, x_layer1)
+        
+        #x = self.up_block1(x_out_mix2)
+        #x = self.up_block1(x)
+
+        # x = self.up_block1(x_mid)
+        # x = self.attention1(x)
+        # x = torch.cat((x, x_layer2), 1)
+        # x = self.up_block1(x)
+        # x = self.attention2(x)
+
+        # Padding: not in the og implementation
+        # used in validation only
+        # x_layer1_size = x_layer1.size()
+        # pad = torch.zeros(x_layer1_size[0], x_layer1_size[1], x_layer1_size[2], 1).to(device='cuda')
+        # x_layer1 = torch.cat((x_layer1, pad), 3)
+
+        # x = torch.cat((x, x_layer1), 1)
+        # x = self.up_block1(x)
+        # x = self.up_block1(x)
         x = self.up_block1(x_mid)
         x = self.attention1(x) 
         x = torch.cat((x, x_layer2), 1)
         x = self.up_block1(x) 
         x = self.attention2(x) 
         # Padding: not in the og implementation
-        x_layer1_size = x_layer1.size()
-        pad = torch.zeros(x_layer1_size[0], x_layer1_size[1], x_layer1_size[2], 1).to(device='cuda')
-        x_layer1 = torch.cat((x_layer1, pad), 3)
         x = torch.cat((x, x_layer1), 1)
         x = self.up_block1(x) 
         x = self.up_block1(x)
-        
+        x = self.enhancer(x)
         x = self.enhancer(x)
         out = self.tail(x)
-
+#        x,x_layer1,x_layer2 = self.encoder(input) 
+#        print(x.size(), "X")
+#        print(x_layer1.size(), "layer 1")
+#        print(x_layer2.size(), "layer2 ")
+#
+#        x_mid = self.mid_conv(x)
+#        print(x_mid.size())        
+#        x = self.up_block1(x_mid)
+#        print(x.size(), "up1")
+#        x = self.attention1(x) 
+#        print(x.size(), "up2")
+#        x = torch.cat((x, x_layer2), 1)
+#        print(x.size(), "x ")
+#        x = self.up_block1(x)
+#        print(x.size(), "x 2") 
+#        x = self.attention2(x) 
+#        print(x.size(), "up3")       
+#        x = torch.cat((x, x_layer1), 1)
+#        x = self.up_block1(x) 
+#        x = self.up_block1(x)
+#        
+#        x = self.enhancer(x)
+#        out = self.tail(x)
         return out, x_mid

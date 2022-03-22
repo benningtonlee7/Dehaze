@@ -6,12 +6,11 @@ import glob
 from pathlib import Path
 import cv2
 import os
-
+import torch
 
 class ImageDataset(Dataset):
 
     def __init__(self, root_dir, transform=None, cut_off=None, is_val=False):
-
         super(ImageDataset, self).__init__()
         # root directory
         self.root_dir = root_dir
@@ -45,14 +44,14 @@ class ImageDataset(Dataset):
 
         return: img tensor
         """
-
+        if torch.is_tensor(index):
+            index = index.tolist()
         hazed_img = self.hazy_imgs[index]
         clean_img = self.clean_imgs[index]
-
+        
         if self.transform:
             hazed_img = self.transform(hazed_img)
             clean_img = self.transform(clean_img)
-
         return hazed_img, clean_img
 
     def __len__(self):
@@ -67,9 +66,12 @@ def train_transform(size=None):
     transform_list = []
     if size is not None:
         transform_list.append(transforms.Resize(size))
+    transform_list.append(transforms.ToPILImage())
     transform_list.append(transforms.RandomCrop([256, 256]))
+    transform_list.append(transforms.RandomHorizontalFlip())
     transform_list.append(transforms.RandomRotation([90, 270]))
     transform_list.append(transforms.ToTensor())
+    transform_list.append(transforms.Normalize(mean=[0.64, 0.6, 0.58],std=[0.14,0.15, 0.152]))
     return transforms.Compose(transform_list)
 
 

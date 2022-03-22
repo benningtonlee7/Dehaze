@@ -2,10 +2,9 @@ import argparse
 import copy
 import logging
 from datetime import datetime
-from model import *
 from PIL import Image
-
-from dataloader import *
+from models.model import *
+from utils.dataloader import *
 import numpy as np
 import torch
 import torch.nn as nn
